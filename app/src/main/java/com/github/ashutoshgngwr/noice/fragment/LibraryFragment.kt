@@ -117,11 +117,7 @@ class LibraryFragment : Fragment(), SoundViewHolder.ViewController {
       viewModel.downloadStates.collect(adapter::setDownloadStates)
     }
 
-    viewLifecycleOwner.launchAndRepeatOnStarted {
-      viewModel.isSubscribed
-        .map { !it }
-        .collect(adapter::setSoundPremiumStatusEnabled)
-    }
+    adapter.setSoundPremiumStatusEnabled(false)
 
     viewLifecycleOwner.launchAndRepeatOnStarted {
       viewModel.isSavePresetButtonVisible.collect { isVisible ->
@@ -194,11 +190,6 @@ class LibraryFragment : Fragment(), SoundViewHolder.ViewController {
   }
 
   override fun onSoundPlayClicked(soundInfo: SoundInfo) {
-    if (soundInfo.isPremium && !viewModel.isSubscribed.value) {
-      mainNavController.navigate(R.id.view_subscription_plans)
-      return
-    }
-
     playbackServiceController.playSound(soundInfo.id)
   }
 
@@ -227,11 +218,6 @@ class LibraryFragment : Fragment(), SoundViewHolder.ViewController {
   }
 
   override fun onSoundDownloadClicked(soundInfo: SoundInfo) {
-    if (!viewModel.isSubscribed.value) {
-      mainNavController.navigate(R.id.view_subscription_plans)
-      return
-    }
-
     SoundDownloadsRefreshWorker.addSoundDownload(requireContext(), soundInfo.id)
     getString(R.string.sound_scheduled_for_download, soundInfo.name)
       .also { showSuccessSnackBar(it, snackBarAnchorView()) }
@@ -294,8 +280,6 @@ class LibraryViewModel @Inject constructor(
 
   internal val downloadStates: StateFlow<Map<String, SoundDownloadState>> = soundRepository
     .getDownloadStates()
-    // emit download states only when user owns an active subscription
-    .combine(isSubscribed) { states, subscribed -> if (subscribed) states else emptyMap() }
     .stateIn(viewModelScope, SharingStarted.Eagerly, emptyMap())
 
   val isLoading: StateFlow<Boolean> = soundInfosResource.transform { r ->

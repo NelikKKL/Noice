@@ -45,7 +45,7 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.lastOrNull
 import kotlinx.coroutines.flow.stateIn
@@ -199,9 +199,9 @@ class SoundPlaybackService : LifecycleService(), SoundPlayerManager.Listener,
     }
 
     lifecycleScope.launch {
-      subscriptionRepository.isSubscribed().collect { subscribed ->
-        soundDataSourceFactory.enableDownloadedSounds = subscribed
-        soundPlayerManager.setPremiumSegmentsEnabled(subscribed)
+      subscriptionRepository.isSubscribed().collect { _ ->
+        soundDataSourceFactory.enableDownloadedSounds = true
+        soundPlayerManager.setPremiumSegmentsEnabled(true)
       }
     }
 
@@ -228,11 +228,8 @@ class SoundPlaybackService : LifecycleService(), SoundPlayerManager.Listener,
     }
 
     lifecycleScope.launch {
-      val audioQualityFlow = settingsRepository.getAudioQualityAsFlow()
-      val isSubscribedFlow = subscriptionRepository.isSubscribed()
-      combine(audioQualityFlow, isSubscribedFlow) { quality, subscribed ->
-        if (subscribed) quality else SettingsRepository.FREE_AUDIO_QUALITY
-      }.collect { soundPlayerManager.setAudioBitrate(it.bitrate) }
+      settingsRepository.getAudioQualityAsFlow()
+        .collect { soundPlayerManager.setAudioBitrate(it.bitrate) }
     }
   }
 

@@ -38,24 +38,17 @@ import com.github.ashutoshgngwr.noice.metrics.AnalyticsProvider
 import com.github.ashutoshgngwr.noice.models.Alarm
 import com.github.ashutoshgngwr.noice.models.Preset
 import com.github.ashutoshgngwr.noice.repository.AlarmRepository
-import com.github.ashutoshgngwr.noice.repository.SubscriptionRepository
 import dagger.hilt.android.AndroidEntryPoint
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
-import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.filter
-import kotlinx.coroutines.flow.filterNot
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import java.util.Calendar
 import javax.inject.Inject
-
-private const val FREE_ALARM_COUNT = 2
 
 @AndroidEntryPoint
 class AlarmsFragment : Fragment(), AlarmViewHolder.ViewController {
@@ -104,14 +97,6 @@ class AlarmsFragment : Fragment(), AlarmViewHolder.ViewController {
 
     viewLifecycleOwner.launchAndRepeatOnStarted {
       viewModel.alarmsPagingData.collectLatest(adapter::submitData)
-    }
-
-    viewLifecycleOwner.launchAndRepeatOnStarted {
-      viewModel.isSubscribed
-        .filterNot { it }
-        .map { viewModel.disableAll(FREE_ALARM_COUNT) }
-        .filter { it > 0 }
-        .collect { showErrorSnackBar(R.string.alarms_disabled_due_to_subscription_expiration) }
     }
 
     analyticsProvider?.setCurrentScreen(this::class)
@@ -218,11 +203,6 @@ class AlarmsFragment : Fragment(), AlarmViewHolder.ViewController {
       return
     }
 
-    if (enabled && !viewModel.canEnableMoreAlarms()) {
-      mainNavController.navigate(R.id.view_subscription_plans)
-      return
-    }
-
     viewModel.save(alarm.copy(isEnabled = enabled))
   }
 
@@ -256,7 +236,6 @@ class AlarmsFragment : Fragment(), AlarmViewHolder.ViewController {
 @HiltViewModel
 class AlarmsViewModel @Inject constructor(
   private val alarmRepository: AlarmRepository,
-  subscriptionRepository: SubscriptionRepository,
   savedStateHandle: SavedStateHandle,
 ) : ViewModel() {
 
@@ -271,12 +250,6 @@ class AlarmsViewModel @Inject constructor(
     .combine(expandedAlarmId) { pagingData, expandedAlarmId ->
       pagingData.map { AlarmItem(it, it.id == expandedAlarmId) }
     }
-
-  internal val isSubscribed: StateFlow<Boolean> = subscriptionRepository.isSubscribed()
-    .stateIn(viewModelScope, SharingStarted.Eagerly, true)
-
-  private val enabledCount = alarmRepository.countEnabled()
-    .stateIn(viewModelScope, SharingStarted.Eagerly, 0)
 
   internal fun hasScheduleAlarmsPermission(): Boolean {
     return alarmRepository.canScheduleAlarms()
@@ -313,7 +286,7 @@ class AlarmsViewModel @Inject constructor(
   }
 
   internal fun canEnableMoreAlarms(): Boolean {
-    return hasScheduleAlarmsPermission() && (isSubscribed.value || enabledCount.value < FREE_ALARM_COUNT)
+    return hasScheduleAlarmsPermission()
   }
 
   internal fun setExpandedAlarmId(id: Int?) {
