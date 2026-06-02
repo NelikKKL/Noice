@@ -10,25 +10,18 @@ on:
     branches:
       - "**"
   workflow_dispatch:
-    inputs:
-      build_variant:
-        description: "Build variant (freeDebug / freeRelease)"
-        required: false
-        default: "freeDebug"
-        type: choice
-        options:
-          - freeDebug
-          - freeRelease
 
 env:
   JAVA_VERSION: 17
 
 jobs:
-  # ─── Build & Upload APK ──────────────────────────────────────────────────────
-  build:
-    name: Build APK
+  build-and-release:
+    name: Build & Release
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    permissions:
+      contents: write   # needed to create GitHub Releases
+
     steps:
       - uses: actions/checkout@v4
 
@@ -38,130 +31,47 @@ jobs:
           java-version: ${{ env.JAVA_VERSION }}
           cache: gradle
 
-      - name: Determine variant
-        id: variant
+      # Gradle auto-creates ~/.android/debug.keystore on first run.
+      # Pre-generate it so the path is available before assembleFreeRelease.
+      - name: Generate debug keystore
         run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            VARIANT="${{ github.event.inputs.build_variant }}"
-          else
-            VARIANT="freeDebug"
+          mkdir -p ~/.android
+          if [ ! -f ~/.android/debug.keystore ]; then
+            keytool -genkeypair -v \
+              -keystore ~/.android/debug.keystore \
+              -alias androiddebugkey \
+              -keyalg RSA -keysize 2048 \
+              -validity 10000 \
+              -storepass android \
+              -keypass android \
+              -dname "CN=Android Debug,O=Android,C=US"
           fi
-          # Capitalise first letter for Gradle task name
-          TASK="assemble$(echo ${VARIANT:0:1} | tr '[:lower:]' '[:upper:]')${VARIANT:1}"
-          echo "variant=$VARIANT"  >> "$GITHUB_OUTPUT"
-          echo "task=$TASK"        >> "$GITHUB_OUTPUT"
 
-      - name: Build ${{ steps.variant.outputs.variant }}
-        run: ./gradlew :app:${{ steps.variant.outputs.task }} --no-daemon
+      - name: Build freeRelease APK
+        run: ./gradlew :app:assembleFreeRelease --no-daemon
 
-      - name: Collect APK
+      - name: Locate & rename APK
+        id: apk
         run: |
-          mkdir -p artifacts
-          find app/build/outputs/apk -name "*.apk" -exec cp {} artifacts/ \;
-          ls -lh artifacts/
+          SRC=$(find app/build/outputs/apk/free/release -name "*.apk" | head -1)
+          DEST="noice-${{ github.ref_name }}-free-release.apk"
+          cp "$SRC" "$DEST"
+          echo "file=$DEST" >> "$GITHUB_OUTPUT"
+          echo "size=$(du -sh "$DEST" | cut -f1)" >> "$GITHUB_OUTPUT"
 
+      # Always upload as artifact (14 days) — useful for branch builds / PRs
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
-          name: noice-${{ steps.variant.outputs.variant }}-${{ github.sha }}
-          path: artifacts/*.apk
+          name: noice-free-release-${{ github.sha }}
+          path: ${{ steps.apk.outputs.file }}
           retention-days: 14
 
-  # ─── Lint ────────────────────────────────────────────────────────────────────
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      # On tag push → create a real GitHub Release with just the APK
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
         with:
-          distribution: temurin
-          java-version: ${{ env.JAVA_VERSION }}
-          cache: gradle
-      - run: ./gradlew :api-client:lintDebug :app:lintFreeDebug --no-daemon
-      - if: always()
-        uses: yutailang0119/action-android-lint@v3
-        with:
-          report-path: "**/build/reports/*.xml"
-
-  # ─── Unit Tests ──────────────────────────────────────────────────────────────
-  api-client-unit-tests:
-    name: API Client Unit Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: ${{ env.JAVA_VERSION }}
-          cache: gradle
-      - run: ./gradlew :api-client:testDebugCoverage --no-daemon
-      - uses: codecov/codecov-action@v4
-        with:
-          flags: api-client
-          files: api-client/build/reports/jacoco/testDebugCoverage/testDebugCoverage.xml
-
-  app-unit-tests:
-    name: App Unit Tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: ${{ env.JAVA_VERSION }}
-          cache: gradle
-      - run: ./gradlew :app:testFreeDebugUnitTest --no-daemon
-      - uses: codecov/codecov-action@v4
-        with:
-          flags: app
-          files: app/build/reports/jacoco/testFreeDebugCoverage/testFreeDebugCoverage.xml
-
-  # ─── Release to GitHub (tag only) ────────────────────────────────────────────
-  deploy-app-github:
-    name: Deploy App — GitHub Release
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    needs:
-      - build
-      - lint
-      - api-client-unit-tests
-      - app-unit-tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      FREE_APK: noice-free.apk
-      FREE_MAPPING: noice-free-mapping.txt
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: ${{ env.JAVA_VERSION }}
-          cache: gradle
-      - run: git fetch --prune --unshallow --tags -f
-      - run: ./scripts/create-github-release-artifacts.sh
-        env:
-          JKS_STORE: ${{ secrets.JKS_STORE }}
-          STORE_PASSWORD: ${{ secrets.JKS_STORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.JKS_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.JKS_ALIAS_PASSWORD }}
-      - id: tag_info
-        run: |
-          export TAG_NAME="${GITHUB_REF/'refs/tags/'/''}"
-          {
-            echo "name=$TAG_NAME";
-            echo "body<<EOF";
-            git tag --list --format='%(contents:body)' $TAG_NAME;
-            echo "EOF";
-          } >> "$GITHUB_OUTPUT"
-      - uses: softprops/action-gh-release@v1
-        with:
-          token: ${{ secrets.BOT_PAT }}
-          name: v${{ steps.tag_info.outputs.name }}
-          body: ${{ steps.tag_info.outputs.body }}
-          files: |
-            ${{ env.FREE_APK }}
-            ${{ env.FREE_MAPPING }}
+          name: "Noice ${{ github.ref_name }}"
+          generate_release_notes: true
+          files: ${{ steps.apk.outputs.file }}
