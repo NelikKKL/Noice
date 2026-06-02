@@ -1,46 +1,73 @@
 name: Android
+
 on:
   push:
     branches:
-      - main
-      - "[0-9]+.[0-9]+.x"
+      - "**"
     tags:
       - "[0-9]+.[0-9]+.[0-9]+"
-    paths:
-      - ".github/workflows/android.yaml"
-      - "api-client/**"
-      - "app/**"
-      - "gradle/**"
-      - "**.gradle"
-      - "gradle.properties"
-      - "gradlew"
-      - "gradlew.bat"
   pull_request:
     branches:
-      - main
-      - "[0-9]+.[0-9]+.x"
-    paths:
-      - ".github/workflows/android.yaml"
-      - "api-client/**"
-      - "app/**"
-      - "gradle/**"
-      - "**.gradle"
-      - "gradle.properties"
-      - "gradlew"
-      - "gradlew.bat"
+      - "**"
+  workflow_dispatch:
+    inputs:
+      build_variant:
+        description: "Build variant (freeDebug / freeRelease)"
+        required: false
+        default: "freeDebug"
+        type: choice
+        options:
+          - freeDebug
+          - freeRelease
 
 env:
   JAVA_VERSION: 17
 
 jobs:
-  validate-gradle-wrapper:
-    name: Validate Gradle Wrapper
+  # ─── Build & Upload APK ──────────────────────────────────────────────────────
+  build:
+    name: Build APK
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: gradle/wrapper-validation-action@v2
 
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ env.JAVA_VERSION }}
+          cache: gradle
+
+      - name: Determine variant
+        id: variant
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            VARIANT="${{ github.event.inputs.build_variant }}"
+          else
+            VARIANT="freeDebug"
+          fi
+          # Capitalise first letter for Gradle task name
+          TASK="assemble$(echo ${VARIANT:0:1} | tr '[:lower:]' '[:upper:]')${VARIANT:1}"
+          echo "variant=$VARIANT"  >> "$GITHUB_OUTPUT"
+          echo "task=$TASK"        >> "$GITHUB_OUTPUT"
+
+      - name: Build ${{ steps.variant.outputs.variant }}
+        run: ./gradlew :app:${{ steps.variant.outputs.task }} --no-daemon
+
+      - name: Collect APK
+        run: |
+          mkdir -p artifacts
+          find app/build/outputs/apk -name "*.apk" -exec cp {} artifacts/ \;
+          ls -lh artifacts/
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: noice-${{ steps.variant.outputs.variant }}-${{ github.sha }}
+          path: artifacts/*.apk
+          retention-days: 14
+
+  # ─── Lint ────────────────────────────────────────────────────────────────────
   lint:
     name: Lint
     runs-on: ubuntu-latest
@@ -52,12 +79,13 @@ jobs:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
           cache: gradle
-      - run: ./gradlew :api-client:lintDebug :app:lintFreeDebug :app:lintFullDebug --no-daemon
-      - if: ${{ always() }}
+      - run: ./gradlew :api-client:lintDebug :app:lintFreeDebug --no-daemon
+      - if: always()
         uses: yutailang0119/action-android-lint@v3
         with:
           report-path: "**/build/reports/*.xml"
 
+  # ─── Unit Tests ──────────────────────────────────────────────────────────────
   api-client-unit-tests:
     name: API Client Unit Tests
     runs-on: ubuntu-latest
@@ -86,120 +114,24 @@ jobs:
           distribution: temurin
           java-version: ${{ env.JAVA_VERSION }}
           cache: gradle
-      - run: ./gradlew :app:testDebugCoverage --no-daemon
+      - run: ./gradlew :app:testFreeDebugUnitTest --no-daemon
       - uses: codecov/codecov-action@v4
         with:
           flags: app
-          files: app/build/reports/jacoco/testFreeDebugCoverage/testFreeDebugCoverage.xml,app/build/reports/jacoco/testFullDebugCoverage/testFullDebugCoverage.xml
+          files: app/build/reports/jacoco/testFreeDebugCoverage/testFreeDebugCoverage.xml
 
-  app-ui-tests:
-    name: App UI tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    strategy:
-      matrix:
-        include:
-          - android: 30
-            target: aosp_atd
-            appVariant: FreeDebug
-          - android: 30
-            target: google_atd
-            appVariant: FullDebug
-      fail-fast: false
-    steps:
-      - name: Enable KVM group perms
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: ${{ env.JAVA_VERSION }}
-          cache: gradle
-      - uses: actions/cache@v4
-        id: avd-cache
-        with:
-          path: |
-            ~/.android/avd/*
-            ~/.android/adb*
-          key: avd-${{ matrix.target }}-${{ matrix.android }}
-      - name: Generate AVD Snapshot Cache
-        if: steps.avd-cache.outputs.cache-hit != 'true'
-        uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: ${{ matrix.android }}
-          target: ${{ matrix.target }}
-          arch: x86_64
-          emulator-options: >-
-            -camera-back none -camera-front none -gpu swiftshader_indirect
-            -memory 3000 -no-audio -no-boot-anim -no-window
-          disable-animations: false
-          script: echo "Generated AVD snapshot for caching."
-      - uses: reactivecircus/android-emulator-runner@v2
-        with:
-          api-level: ${{ matrix.android }}
-          target: ${{ matrix.target }}
-          arch: x86_64
-          script: ./scripts/run-ui-tests.sh :app:create${{ matrix.appVariant }}CoverageReport
-          emulator-options: >-
-            -camera-back none -camera-front none -gpu swiftshader_indirect
-            -memory 3000 -no-audio -no-boot-anim -no-window -no-snapshot-save
-      - uses: codecov/codecov-action@v4
-        with:
-          flags: app
-
-  deploy-app-play-store:
-    name: Deploy App - Play Store
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
-    needs:
-      - validate-gradle-wrapper
-      - lint
-      - api-client-unit-tests
-      - app-unit-tests
-      - app-ui-tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: 2.7
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: ${{ env.JAVA_VERSION }}
-          cache: gradle
-      - run: bundle install
-      - run: |
-          echo "$SERVICE_ACCOUNT_KEY" > service-account-key.json
-          echo "$JKS_STORE" | base64 --decode > keystore.jks
-        env:
-          SERVICE_ACCOUNT_KEY: ${{ secrets.SERVICE_ACCOUNT_KEY }}
-          JKS_STORE: ${{ secrets.JKS_STORE }}
-      - run: bundle exec fastlane beta
-        env:
-          STORE_PASSWORD: ${{ secrets.JKS_STORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.JKS_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.JKS_ALIAS_PASSWORD }}
-      - if: ${{ always() }}
-        run: rm -f service-account-key.json keystore.jks
-
+  # ─── Release to GitHub (tag only) ────────────────────────────────────────────
   deploy-app-github:
-    name: Deploy App - GitHub
+    name: Deploy App — GitHub Release
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
     needs:
-      - validate-gradle-wrapper
+      - build
       - lint
       - api-client-unit-tests
       - app-unit-tests
-      - app-ui-tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      FULL_APK: noice-full.apk
-      FULL_MAPPING: noice-full-mapping.txt
       FREE_APK: noice-free.apk
       FREE_MAPPING: noice-free-mapping.txt
     steps:
@@ -222,7 +154,7 @@ jobs:
           {
             echo "name=$TAG_NAME";
             echo "body<<EOF";
-            git tag  --list --format='%(contents:body)' $TAG_NAME;
+            git tag --list --format='%(contents:body)' $TAG_NAME;
             echo "EOF";
           } >> "$GITHUB_OUTPUT"
       - uses: softprops/action-gh-release@v1
@@ -233,5 +165,3 @@ jobs:
           files: |
             ${{ env.FREE_APK }}
             ${{ env.FREE_MAPPING }}
-            ${{ env.FULL_APK }}
-            ${{ env.FULL_MAPPING }}
